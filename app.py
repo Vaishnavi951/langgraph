@@ -31,16 +31,14 @@ class CrewState(TypedDict):
 
 
 # ============================================================
-# 2. PYTHON CODE EXECUTION TOOL
+# 2. PYTHON CODE EXECUTION
 # ============================================================
 
 def run_python_code(code: str) -> str:
-    """
-    Executes generated Python code and captures terminal output.
-    """
 
     clean_code = code.strip()
 
+    # Remove Markdown code fences if Gemini returns them
     if clean_code.startswith("```python"):
         clean_code = clean_code[len("```python"):].strip()
 
@@ -56,7 +54,8 @@ def run_python_code(code: str) -> str:
     sys.stdout = new_stdout
 
     try:
-        # Use the SAME dictionary for globals and locals.
+
+        # Same dictionary for globals and locals.
         # This allows recursive functions such as factorial()
         # to work correctly.
         execution_scope = {
@@ -72,19 +71,20 @@ def run_python_code(code: str) -> str:
         result = new_stdout.getvalue()
 
     except Exception:
+
         result = (
             "Execution Error:\n"
             + traceback.format_exc()
         )
 
     finally:
+
         sys.stdout = old_stdout
 
-    return (
-        result.strip()
-        if result.strip()
-        else "Success (no terminal output)"
-    )
+    if result.strip():
+        return result.strip()
+
+    return "Success (no terminal output)"
 
 
 # ============================================================
@@ -94,13 +94,13 @@ def run_python_code(code: str) -> str:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    raise ValueError(
-        "GEMINI_API_KEY environment variable is not set."
+    raise RuntimeError(
+        "GEMINI_API_KEY is not configured in Render Environment Variables."
     )
 
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-3.1-flash-lite-preview",
+    model="gemini-3.1-flash-lite",
     google_api_key=GEMINI_API_KEY,
     temperature=0
 )
@@ -143,29 +143,35 @@ def real_time_developer(state: CrewState):
     task = messages[-1].content
 
     developer_prompt = f"""
-You are the Developer in a Developer-Tester software
-development workflow.
+You are the Developer in a Developer-Tester
+software development workflow.
 
-The user has given the following coding task:
-
+Coding task:
 {task}
 
 Write a complete Python program that solves the task.
 
-Requirements:
+Rules:
 
 1. Return ONLY Python code.
-2. Do not include explanations.
+2. Do not return explanations.
 3. Do not use Markdown code fences.
 4. The code must be syntactically correct.
 5. The code must be executable.
-6. Include print statements so the output can be tested.
+6. Include print statements for the result.
 7. Avoid unnecessary external libraries.
+8. Do NOT use input() because the program will be
+   automatically executed by a server-side tester.
+9. Use a simple example value inside the program when
+   input is required.
 """
 
     response = llm.invoke(developer_prompt)
 
     generated_code = response.content
+
+    if not isinstance(generated_code, str):
+        generated_code = str(generated_code)
 
     return {
         "code": generated_code,
@@ -182,6 +188,7 @@ def real_time_tester(state: CrewState):
     code = state.get("code")
 
     if not code:
+
         return {
             "report": "No code was generated.",
             "next_step": "manager_decision"
@@ -190,38 +197,45 @@ def real_time_tester(state: CrewState):
     tester_prompt = f"""
 You are the Tester in a Developer-Tester workflow.
 
-Analyze the following Python program:
+Analyze this Python program:
 
 {code}
 
-Generate suitable test cases for this program.
+Generate suitable test cases.
 
-For each test case provide:
+For every test case give:
 
 1. Test case number
 2. Input
 3. Expected output
 4. Purpose
 
-Keep the test cases simple and relevant.
+Also identify whether the generated program
+appears correct.
 
-Return the test cases in plain text.
+Return the testing information in plain text.
 """
 
     response = llm.invoke(tester_prompt)
 
     test_cases = response.content
 
-    # Execute the generated program
+    if not isinstance(test_cases, str):
+        test_cases = str(test_cases)
+
+    # Execute generated code
     execution_result = run_python_code(code)
 
     report = f"""
 GENERATED TEST CASES
---------------------
+====================
+
 {test_cases}
 
+
 PROGRAM EXECUTION RESULT
-------------------------
+========================
+
 {execution_result}
 """
 
@@ -245,6 +259,7 @@ def manager_decision_node(state: CrewState):
     command = command.lower().strip()
 
     if command == "another":
+
         return {
             "next_step": "task_input"
         }
@@ -264,17 +279,21 @@ def archiver_node(state: CrewState):
     report = state.get("report", "")
 
     archive_message = f"""
-TASK ARCHIVED
+==================================================
+                 TASK ARCHIVED
+==================================================
 
-================ GENERATED CODE ================
+GENERATED CODE
+--------------------------------------------------
 
 {code}
 
-================ TEST REPORT ===================
+TEST REPORT
+--------------------------------------------------
 
 {report}
 
-=================================================
+==================================================
 """
 
     print(archive_message)
@@ -316,6 +335,9 @@ def route_from_decision(state: CrewState):
 # ============================================================
 
 rt_workflow = StateGraph(CrewState)
+
+
+# Add nodes
 
 rt_workflow.add_node(
     "task_input",
@@ -391,10 +413,9 @@ rt_workflow.add_edge(
 )
 
 
-# COMPILE
+# Compile
 
 rt_app = rt_workflow.compile()
-
 
 print(
     "Interactive Developer-Tester LangGraph "
@@ -422,7 +443,7 @@ class AgentInput(TypedDict):
 
 
 # ============================================================
-# 12. FORMAT INPUT FOR LANGGRAPH
+# 12. FORMAT INPUT
 # ============================================================
 
 def format_for_agent(x):
