@@ -3,8 +3,7 @@ uvicorn
 langserve
 langchain
 langchain-core
-langchain-google-genai
 langgraph
-requests
-sse-starlette
+langchain-google-genai
 pydantic
+typing-extensions
