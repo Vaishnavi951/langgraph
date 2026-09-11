@@ -452,7 +452,6 @@ rt_app = rt_workflow.compile()
 # ============================================================
 
 class AgentInput(BaseModel):
-
     task: str = Field(
         description="Coding task for the Developer and Tester"
     )
@@ -462,10 +461,6 @@ class AgentInput(BaseModel):
         description="Manager command: store or another"
     )
 
-
-# ============================================================
-# FORMAT INPUT
-# ============================================================
 
 def format_for_agent(x):
 
@@ -486,12 +481,19 @@ def format_for_agent(x):
     }
 
 
-# ============================================================
-# EXTRACT GENERATED CODE
-# ============================================================
+class AgentOutput(BaseModel):
+    code: str = Field(
+        description="Generated Python code"
+    )
+
 
 def extract_code(state):
-    return state["code"]
+    return {
+        "code": state.get(
+            "code",
+            "No code was generated."
+        )
+    }
 
 
 formatted_agent_chain = (
@@ -500,21 +502,13 @@ formatted_agent_chain = (
     | RunnableLambda(extract_code)
 ).with_types(
     input_type=AgentInput,
-    output_type=str
+    output_type=AgentOutput
 )
 
-# ============================================================
-# FASTAPI
-# ============================================================
 
 app = FastAPI(
     title="LangGraph Developer Tester"
 )
-
-
-# ============================================================
-# LANGSERVE
-# ============================================================
 
 add_routes(
     app,
@@ -524,13 +518,8 @@ add_routes(
 )
 
 
-# ============================================================
-# HOME
-# ============================================================
-
 @app.get("/")
 def home():
-
     return {
         "message": "LangGraph Developer Tester API is running",
         "endpoint": "/agent",
@@ -539,21 +528,12 @@ def home():
     }
 
 
-# ============================================================
-# START SERVER
-# ============================================================
-
 if __name__ == "__main__":
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            8000
-        )
-    )
+    port = int(os.environ.get("PORT", 8000))
 
     uvicorn.run(
         app,
         host="0.0.0.0",
         port=port
     )
+        
