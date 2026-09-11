@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 langserve
+sse-starlette
 langchain
 langchain-core
 langgraph
