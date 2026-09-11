@@ -491,16 +491,8 @@ def format_for_agent(x):
 # ============================================================
 
 def extract_code(state):
+    return state["code"]
 
-    return state.get(
-        "code",
-        "No code was generated."
-    )
-
-
-# ============================================================
-# LANGSERVE CHAIN
-# ============================================================
 
 formatted_agent_chain = (
     RunnableLambda(format_for_agent)
@@ -510,7 +502,6 @@ formatted_agent_chain = (
     input_type=AgentInput,
     output_type=str
 )
-
 
 # ============================================================
 # FASTAPI
