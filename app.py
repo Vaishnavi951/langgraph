@@ -264,18 +264,14 @@ def format_for_agent(x):
         "command": command
     }
 
-class AgentOutput(BaseModel):
-    code: str = Field(description="Generated Python code")
-
 def extract_code(state):
-    return {"code": state.get("code", "No code was generated.")}
+    return state.get("code", "No code was generated.")
 
 formatted_agent_chain = (
     RunnableLambda(format_for_agent)
     | rt_app
     | RunnableLambda(extract_code)
-).with_types(input_type=AgentInput, output_type=AgentOutput)
-
+).with_types(input_type=AgentInput, output_type=str)
 app = FastAPI(title="LangGraph Developer Tester")
 
 add_routes(app, formatted_agent_chain, path="/agent", playground_type="default")
