@@ -264,36 +264,19 @@ def format_for_agent(x):
         "command": command
     }
 
-def extract_code(state):
-    return {
-        "code": state.get(
-            "code",
-            "No code was generated."
-        )
-    }
+def run_agent(x):
+    state = format_for_agent(x)
+    result = rt_app.invoke(state)
+    return result.get("code", "No code was generated.")
 
-
-formatted_agent_chain = (
-    RunnableLambda(format_for_agent)
-    | rt_app
-    | RunnableLambda(extract_code)
-).with_types(
+formatted_agent_chain = RunnableLambda(run_agent).with_types(
     input_type=AgentInput,
-    output_type=AgentOutput
+    output_type=str
 )
 
+app = FastAPI(title="LangGraph Developer Tester")
 
-app = FastAPI(
-    title="LangGraph Developer Tester"
-)
-
-add_routes(
-    app,
-    formatted_agent_chain,
-    path="/agent",
-    playground_type="default"
-)
-
+add_routes(app, formatted_agent_chain, path="/agent", playground_type="default")
 
 @app.get("/")
 def home():
@@ -304,13 +287,6 @@ def home():
         "docs": "/docs/"
     }
 
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port
-    ) 
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port).0.0.0", port=port)
