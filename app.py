@@ -82,14 +82,7 @@ Do not generate Python code.
 Return only the test-case description.
 """
 response = llm.invoke(prompt)
-
-if isinstance(response.content, list):
-    generated_code = "\n".join(
-        block.get("text", "") if isinstance(block, dict) else str(block)
-        for block in response.content
-    ).strip()
-else:
-    generated_code = str(response.content).strip()
+generated_code = response.content.strip()
 
 def task_input_node(state: CrewState):
     task = state.get("task")
