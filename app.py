@@ -448,7 +448,7 @@ rt_app = rt_workflow.compile()
 
 
 # ============================================================
-# 13. LANGSERVE INPUT MODEL
+# LANGSERVE INPUT MODEL
 # ============================================================
 
 class AgentInput(BaseModel):
@@ -464,27 +464,17 @@ class AgentInput(BaseModel):
 
 
 # ============================================================
-# 14. FORMAT LANGSERVE INPUT FOR LANGGRAPH
+# FORMAT INPUT
 # ============================================================
 
 def format_for_agent(x):
 
     if isinstance(x, AgentInput):
-
         task = x.task
         command = x.command
-
     else:
-
-        task = x.get(
-            "task",
-            ""
-        )
-
-        command = x.get(
-            "command",
-            "store"
-        )
+        task = x.get("task", "")
+        command = x.get("command", "store")
 
     return {
         "messages": [],
@@ -497,19 +487,33 @@ def format_for_agent(x):
 
 
 # ============================================================
-# 15. LANGSERVE CHAIN
+# EXTRACT GENERATED CODE
+# ============================================================
+
+def extract_code(state):
+
+    return state.get(
+        "code",
+        "No code was generated."
+    )
+
+
+# ============================================================
+# LANGSERVE CHAIN
 # ============================================================
 
 formatted_agent_chain = (
     RunnableLambda(format_for_agent)
     | rt_app
+    | RunnableLambda(extract_code)
 ).with_types(
-    input_type=AgentInput
+    input_type=AgentInput,
+    output_type=str
 )
 
 
 # ============================================================
-# 16. FASTAPI APPLICATION
+# FASTAPI
 # ============================================================
 
 app = FastAPI(
@@ -518,7 +522,7 @@ app = FastAPI(
 
 
 # ============================================================
-# 17. LANGSERVE ROUTE
+# LANGSERVE
 # ============================================================
 
 add_routes(
@@ -530,7 +534,7 @@ add_routes(
 
 
 # ============================================================
-# 18. HOME ROUTE
+# HOME
 # ============================================================
 
 @app.get("/")
@@ -545,7 +549,7 @@ def home():
 
 
 # ============================================================
-# 19. START SERVER
+# START SERVER
 # ============================================================
 
 if __name__ == "__main__":
