@@ -375,9 +375,14 @@ add_routes(
 )
 
 
-# ==========================================
-# 7. LOCAL SERVER
-# ==========================================
+@app.get("/")
+def home():
+    return {
+        "message": "LangGraph LangServe API is running",
+        "playground": "/agent/playground/",
+        "docs": "/docs/"
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
