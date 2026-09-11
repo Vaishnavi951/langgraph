@@ -1,9 +1,11 @@
 import os
 import io
 import traceback
+import contextlib
 from typing import TypedDict, List, Optional
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from langserve import add_routes
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -14,15 +16,14 @@ from langgraph.graph import StateGraph, START, END
 
 
 # ============================================================
-# 1. GEMINI API CONFIGURATION
+# GEMINI CONFIGURATION
 # ============================================================
 
 api_key = os.environ.get("GEMINI_API_KEY")
 
 if not api_key:
-    raise ValueError(
-        "GEMINI_API_KEY environment variable is not set in Render."
-    )
+    raise ValueError("GEMINI_API_KEY environment variable is not set")
+
 
 llm_flash = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite-preview",
@@ -33,7 +34,7 @@ llm = llm_flash
 
 
 # ============================================================
-# 2. STATE DEFINITION
+# STATE
 # ============================================================
 
 class CrewState(TypedDict, total=False):
@@ -41,23 +42,17 @@ class CrewState(TypedDict, total=False):
     next_step: Optional[str]
     code: Optional[str]
     report: Optional[str]
-
-    # These are used instead of input() for LangServe
     task: Optional[str]
     command: Optional[str]
 
 
 # ============================================================
-# 3. TOOL - RUN PYTHON CODE
+# RUN PYTHON CODE
 # ============================================================
 
 @tool
 def run_python_code(code: str) -> str:
-    """
-    Executes Python code and returns the output.
-    """
 
-    # Remove markdown code fences if Gemini returns them
     code = code.strip()
 
     if code.startswith("```python"):
@@ -69,18 +64,14 @@ def run_python_code(code: str) -> str:
     if code.endswith("```"):
         code = code[:-3].strip()
 
-    # Capture stdout
-    old_stdout = io.StringIO()
-
-    import contextlib
+    output_buffer = io.StringIO()
 
     try:
-        with contextlib.redirect_stdout(old_stdout):
 
-            # Execute the generated Python code
+        with contextlib.redirect_stdout(output_buffer):
             exec(code, {"__name__": "__main__"})
 
-        output = old_stdout.getvalue()
+        output = output_buffer.getvalue()
 
         if output.strip():
             return output.strip()
@@ -92,14 +83,11 @@ def run_python_code(code: str) -> str:
 
 
 # ============================================================
-# 4. TOOL - GENERATE TEST CASES
+# GENERATE TEST CASES
 # ============================================================
 
 @tool
 def generate_test_cases(task_description: str) -> str:
-    """
-    Generates test scenarios for the given programming task.
-    """
 
     prompt = f"""
 You are a Senior QA Engineer.
@@ -125,39 +113,34 @@ Keep the test cases clear and practical.
     content = response.content
 
     if isinstance(content, list):
-        text_parts = []
+
+        parts = []
 
         for item in content:
-            if isinstance(item, dict):
-                text_parts.append(
-                    str(item.get("text", item))
-                )
-            else:
-                text_parts.append(str(item))
 
-        return "\n".join(text_parts)
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", item)))
+            else:
+                parts.append(str(item))
+
+        return "\n".join(parts)
 
     return str(content)
 
 
 # ============================================================
-# 5. TASK INPUT NODE
+# TASK INPUT NODE
 # ============================================================
 
 def task_input_node(state: CrewState):
 
-    # LangServe cannot use terminal input().
-    # Therefore, task is received from the API request.
-
     task = state.get("task")
 
     if not task:
+
         return {
             "next_step": "exit",
-            "messages": state.get(
-                "messages",
-                []
-            )
+            "messages": state.get("messages", [])
         }
 
     message = HumanMessage(content=task)
@@ -172,7 +155,7 @@ def task_input_node(state: CrewState):
 
 
 # ============================================================
-# 6. REAL-TIME DEVELOPER NODE
+# DEVELOPER NODE
 # ============================================================
 
 def real_time_developer(state: CrewState):
@@ -180,14 +163,13 @@ def real_time_developer(state: CrewState):
     messages = state.get("messages", [])
 
     if not messages:
+
         return {
             "code": "",
             "next_step": "tester"
         }
 
-    latest_message = messages[-1]
-
-    task_description = latest_message.content
+    task_description = messages[-1].content
 
     prompt = f"""
 You are an expert Python developer.
@@ -213,24 +195,20 @@ IMPORTANT RULES:
 
     if isinstance(content, list):
 
-        code_parts = []
+        parts = []
 
         for item in content:
 
             if isinstance(item, dict):
-                code_parts.append(
-                    str(item.get("text", item))
-                )
-
+                parts.append(str(item.get("text", item)))
             else:
-                code_parts.append(str(item))
+                parts.append(str(item))
 
-        code_str = "\n".join(code_parts)
+        code_str = "\n".join(parts)
 
     else:
         code_str = str(content)
 
-    # Remove Markdown fences if Gemini still adds them
     code_str = code_str.strip()
 
     if code_str.startswith("```python"):
@@ -249,7 +227,7 @@ IMPORTANT RULES:
 
 
 # ============================================================
-# 7. REAL-TIME TESTER NODE
+# TESTER NODE
 # ============================================================
 
 def real_time_tester(state: CrewState):
@@ -257,21 +235,18 @@ def real_time_tester(state: CrewState):
     task = state.get("task", "")
     code = state.get("code", "")
 
-    # Generate test cases
     test_cases = generate_test_cases.invoke(
         {
             "task_description": task
         }
     )
 
-    # Execute generated code
     execution_output = run_python_code.invoke(
         {
             "code": code
         }
     )
 
-    # Prepare report
     report = f"""
 =============================
 REAL-TIME SOFTWARE TEST REPORT
@@ -310,34 +285,28 @@ END OF REPORT
 
 
 # ============================================================
-# 8. MANAGER DECISION NODE
+# MANAGER NODE
 # ============================================================
 
 def manager_decision_node(state: CrewState):
 
-    report = state.get("report", "")
-
-    # In LangServe we cannot use input().
-    # The command comes from the API request.
-
     command = state.get("command", "store")
 
-    command = command.lower().strip()
+    if command.lower().strip() == "another":
 
-    if command == "another":
         return {
             "next_step": "task_input",
-            "report": report
+            "report": state.get("report", "")
         }
 
     return {
         "next_step": "archiver",
-        "report": report
+        "report": state.get("report", "")
     }
 
 
 # ============================================================
-# 9. ARCHIVER NODE
+# ARCHIVER
 # ============================================================
 
 def archiver_node(state: CrewState):
@@ -348,14 +317,12 @@ def archiver_node(state: CrewState):
 
 
 # ============================================================
-# 10. CONDITIONAL ROUTING
+# ROUTING
 # ============================================================
 
 def route_from_input(state: CrewState):
 
-    next_step = state.get("next_step")
-
-    if next_step == "exit":
+    if state.get("next_step") == "exit":
         return "exit"
 
     return "developer"
@@ -363,16 +330,14 @@ def route_from_input(state: CrewState):
 
 def route_from_decision(state: CrewState):
 
-    next_step = state.get("next_step")
-
-    if next_step == "archiver":
+    if state.get("next_step") == "archiver":
         return "archiver"
 
     return "task_input"
 
 
 # ============================================================
-# 11. BUILD LANGGRAPH WORKFLOW
+# BUILD LANGGRAPH
 # ============================================================
 
 rt_workflow = StateGraph(CrewState)
@@ -403,15 +368,10 @@ rt_workflow.add_node(
 )
 
 
-# START → TASK INPUT
-
 rt_workflow.add_edge(
     START,
     "task_input"
 )
-
-
-# TASK INPUT → DEVELOPER / END
 
 rt_workflow.add_conditional_edges(
     "task_input",
@@ -422,24 +382,15 @@ rt_workflow.add_conditional_edges(
     }
 )
 
-
-# DEVELOPER → TESTER
-
 rt_workflow.add_edge(
     "developer",
     "tester"
 )
 
-
-# TESTER → MANAGER
-
 rt_workflow.add_edge(
     "tester",
     "manager_decision"
 )
-
-
-# MANAGER → ARCHIVER / TASK INPUT
 
 rt_workflow.add_conditional_edges(
     "manager_decision",
@@ -450,33 +401,28 @@ rt_workflow.add_conditional_edges(
     }
 )
 
-
-# ARCHIVER → END
-
 rt_workflow.add_edge(
     "archiver",
     END
 )
 
 
-# COMPILE GRAPH
-
 rt_app = rt_workflow.compile()
 
 
 # ============================================================
-# 12. FASTAPI APPLICATION FOR LANGSERVE
+# FASTAPI
 # ============================================================
 
 app = FastAPI(
     title="Real-Time LangGraph Developer and Tester",
     version="1.0.0",
-    description="LangGraph workflow deployed using LangServe"
+    description="LangGraph Developer and Tester deployed using LangServe"
 )
 
 
 # ============================================================
-# 13. LANGSERVE ROUTE
+# LANGSERVE
 # ============================================================
 
 add_routes(
@@ -487,21 +433,272 @@ add_routes(
 
 
 # ============================================================
-# 14. ROOT ROUTE
+# WEB UI
 # ============================================================
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def home():
 
-    return {
-        "message": "LangGraph LangServe API is running",
-        "endpoint": "/agent",
-        "playground": "/agent/playground/"
+    return """
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+    <title>LangGraph Developer & Tester</title>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f6f8;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 40px auto;
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+
+        textarea {
+            width: 100%;
+            height: 120px;
+            padding: 12px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            box-sizing: border-box;
+            resize: vertical;
+        }
+
+        button {
+            margin-top: 15px;
+            padding: 12px 25px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            background: #222;
+            color: white;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #444;
+        }
+
+        .section {
+            margin-top: 30px;
+        }
+
+        pre {
+            background: #f1f1f1;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+        }
+
+        .loading {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .error {
+            color: red;
+            margin-top: 20px;
+        }
+
+    </style>
+
+</head>
+
+
+<body>
+
+<div class="container">
+
+    <h1>Real-Time LangGraph Developer & Tester</h1>
+
+    <div class="subtitle">
+        Enter a programming task. Gemini Developer generates the code
+        and the Tester generates and executes test cases.
+    </div>
+
+
+    <textarea
+        id="task"
+        placeholder="Example: Write a Python program to check whether a number is even or odd."
+    ></textarea>
+
+
+    <br>
+
+
+    <button onclick="runAgent()">
+        Run Developer & Tester
+    </button>
+
+
+    <div id="loading" class="loading">
+        Running LangGraph... Please wait.
+    </div>
+
+
+    <div id="error" class="error"></div>
+
+
+    <div class="section">
+
+        <h2>Generated Python Code</h2>
+
+        <pre id="code">Your generated code will appear here.</pre>
+
+    </div>
+
+
+    <div class="section">
+
+        <h2>Test Report</h2>
+
+        <pre id="report">Your test report will appear here.</pre>
+
+    </div>
+
+</div>
+
+
+<script>
+
+async function runAgent() {
+
+    const task = document.getElementById("task").value;
+
+    const loading = document.getElementById("loading");
+    const error = document.getElementById("error");
+
+    const code = document.getElementById("code");
+    const report = document.getElementById("report");
+
+
+    if (!task.trim()) {
+
+        alert("Please enter a programming task.");
+
+        return;
     }
 
 
+    loading.style.display = "block";
+    error.innerText = "";
+
+    code.innerText = "Generating code...";
+    report.innerText = "Generating test report...";
+
+
+    try {
+
+        const response = await fetch("/agent/invoke", {
+
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+
+            body: JSON.stringify({
+
+                input: {
+
+                    messages: [],
+
+                    next_step: null,
+
+                    code: null,
+
+                    report: null,
+
+                    task: task,
+
+                    command: "store"
+
+                }
+
+            })
+
+        });
+
+
+        if (!response.ok) {
+
+            throw new Error(
+                "Server returned HTTP " + response.status
+            );
+
+        }
+
+
+        const data = await response.json();
+
+
+        code.innerText =
+            data.output.code || "No code generated.";
+
+
+        report.innerText =
+            data.output.report || "No report generated.";
+
+
+    }
+
+    catch (err) {
+
+        error.innerText =
+            "Error: " + err.message;
+
+        code.innerText = "";
+        report.innerText = "";
+
+    }
+
+    finally {
+
+        loading.style.display = "none";
+
+    }
+
+}
+
+</script>
+
+
+</body>
+
+</html>
+"""
+
+
 # ============================================================
-# 15. LOCAL EXECUTION
+# RUN SERVER
 # ============================================================
 
 if __name__ == "__main__":
