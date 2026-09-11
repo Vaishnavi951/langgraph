@@ -1,42 +1,24 @@
-import sys
-import io
-import traceback
 import os
+import io
+import sys
+import traceback
+import uvicorn
 
-from typing import TypedDict, List, Optional
-
-from langchain_core.messages import BaseMessage, HumanMessage
-from langchain_core.tools import tool
-
-from langgraph.graph import StateGraph, START, END
-
-from langchain_google_genai import ChatGoogleGenerativeAI
+from typing import List, Optional
+from typing_extensions import TypedDict
 
 from fastapi import FastAPI
 from langserve import add_routes
 
+from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.runnables import RunnableLambda
+from langchain_google_genai import ChatGoogleGenerativeAI
 
-# ============================================================
-# 1. LLM INITIALIZATION
-# ============================================================
-
-api_key = os.environ.get("GEMINI_API_KEY")
-
-if not api_key:
-    raise ValueError(
-        "GEMINI_API_KEY is not set in Render Environment Variables"
-    )
-
-llm_flash = ChatGoogleGenerativeAI(
-    model="gemini-3.1-flash-lite-preview",
-    google_api_key=api_key
-)
-
-llm = llm_flash
+from langgraph.graph import StateGraph, START, END
 
 
 # ============================================================
-# 2. STATE DEFINITION
+# 1. STATE
 # ============================================================
 
 class CrewState(TypedDict):
@@ -44,30 +26,29 @@ class CrewState(TypedDict):
     next_step: Optional[str]
     code: Optional[str]
     report: Optional[str]
-
-    # These two fields are used by the web/LangServe UI
     task: Optional[str]
     command: Optional[str]
 
 
 # ============================================================
-# 3. TOOLS
+# 2. PYTHON CODE EXECUTION TOOL
 # ============================================================
 
-@tool
 def run_python_code(code: str) -> str:
-    """Execute python code and return the standard output or error trace."""
+    """
+    Executes generated Python code and captures terminal output.
+    """
 
-    if not isinstance(code, str):
-        code = str(code)
+    clean_code = code.strip()
 
-    # Remove markdown code fences if Gemini returns them
-    clean_code = (
-        code
-        .replace("```python", "")
-        .replace("```", "")
-        .strip()
-    )
+    if clean_code.startswith("```python"):
+        clean_code = clean_code[len("```python"):].strip()
+
+    if clean_code.startswith("```"):
+        clean_code = clean_code[3:].strip()
+
+    if clean_code.endswith("```"):
+        clean_code = clean_code[:-3].strip()
 
     old_stdout = sys.stdout
     new_stdout = io.StringIO()
@@ -75,14 +56,26 @@ def run_python_code(code: str) -> str:
     sys.stdout = new_stdout
 
     try:
-        local_scope = {}
+        # Use the SAME dictionary for globals and locals.
+        # This allows recursive functions such as factorial()
+        # to work correctly.
+        execution_scope = {
+            "__name__": "__main__"
+        }
 
-        exec(clean_code, {}, local_scope)
+        exec(
+            clean_code,
+            execution_scope,
+            execution_scope
+        )
 
         result = new_stdout.getvalue()
 
     except Exception:
-        result = f"Execution Error:\n{traceback.format_exc()}"
+        result = (
+            "Execution Error:\n"
+            + traceback.format_exc()
+        )
 
     finally:
         sys.stdout = old_stdout
@@ -94,49 +87,36 @@ def run_python_code(code: str) -> str:
     )
 
 
-@tool
-def generate_test_cases(task_description: str) -> str:
-    """Generate specific test scenarios for a given coding task."""
+# ============================================================
+# 3. GEMINI MODEL
+# ============================================================
 
-    prompt = (
-        f"You are a Senior QA Engineer. "
-        f"Generate 3 to 5 highly specific test scenarios "
-        f"for the following coding task: '{task_description}'.\n"
-        f"Include standard cases and edge cases. "
-        f"Return them as a numbered list."
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+if not GEMINI_API_KEY:
+    raise ValueError(
+        "GEMINI_API_KEY environment variable is not set."
     )
 
-    response = llm.invoke(prompt)
 
-    return (
-        response.content
-        if hasattr(response, "content")
-        else str(response)
-    )
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite-preview",
+    google_api_key=GEMINI_API_KEY,
+    temperature=0
+)
 
 
 # ============================================================
-# 4. GRAPH NODES
+# 4. TASK INPUT NODE
 # ============================================================
 
 def task_input_node(state: CrewState):
-    """
-    Gets the coding task from the LangServe web request.
-    This replaces the old input() function.
-    """
 
     user_task = state.get("task")
 
     if not user_task:
         return {
-            "next_step": "exit"
-        }
-
-    user_task = user_task.strip()
-
-    if user_task.lower() == "exit":
-        return {
-            "next_step": "exit"
+            "next_step": "end"
         }
 
     return {
@@ -147,178 +127,196 @@ def task_input_node(state: CrewState):
     }
 
 
-# ------------------------------------------------------------
-# DEVELOPER NODE
-# ------------------------------------------------------------
+# ============================================================
+# 5. DEVELOPER NODE
+# ============================================================
 
 def real_time_developer(state: CrewState):
 
-    print("\n[Developer] Writing dynamic code using LLM...")
+    messages = state.get("messages", [])
 
-    # Get latest task
-    task = state["messages"][-1].content
+    if not messages:
+        return {
+            "next_step": "tester"
+        }
 
-    dev_prompt = (
-        f"Write a clean Python script to solve this: {task}. "
-        f"Only return the code, no explanation or markdown formatting."
-    )
+    task = messages[-1].content
 
-    if llm_flash is None:
-        raise ValueError(
-            "LLM is not initialized."
-        )
+    developer_prompt = f"""
+You are the Developer in a Developer-Tester software
+development workflow.
 
-    response = llm_flash.invoke(dev_prompt)
+The user has given the following coding task:
 
-    # Safely parse Gemini content
-    content = response.content
+{task}
 
-    if isinstance(content, list):
+Write a complete Python program that solves the task.
 
-        if len(content) > 0:
+Requirements:
 
-            if isinstance(content[0], dict):
-                code_str = content[0].get("text", "")
-            else:
-                code_str = str(content[0])
+1. Return ONLY Python code.
+2. Do not include explanations.
+3. Do not use Markdown code fences.
+4. The code must be syntactically correct.
+5. The code must be executable.
+6. Include print statements so the output can be tested.
+7. Avoid unnecessary external libraries.
+"""
 
-        else:
-            code_str = ""
+    response = llm.invoke(developer_prompt)
 
-    else:
-        code_str = str(content)
-
-    # Remove markdown fences just in case
-    code_str = (
-        code_str
-        .replace("```python", "")
-        .replace("```", "")
-        .strip()
-    )
-
-    print(code_str)
+    generated_code = response.content
 
     return {
-        "code": code_str
+        "code": generated_code,
+        "next_step": "tester"
     }
 
 
-# ------------------------------------------------------------
-# TESTER NODE
-# ------------------------------------------------------------
+# ============================================================
+# 6. TESTER NODE
+# ============================================================
 
 def real_time_tester(state: CrewState):
 
-    print("\n[Tester] Generating dynamic tests and executing code...")
+    code = state.get("code")
 
-    task = state["messages"][-1].content
-
-    # Generate test cases
-    test_cases = generate_test_cases.invoke(task)
-
-    content = test_cases
-
-    if isinstance(content, list):
-
-        if len(content) > 0:
-
-            if isinstance(content[0], dict):
-                cases_str = content[0].get("text", "")
-            else:
-                cases_str = str(content[0])
-
-        else:
-            cases_str = ""
-
-    else:
-        cases_str = str(content)
-
-    # Execute generated Python code
-    execution_result = run_python_code.invoke(
-        {
-            "code": state["code"]
+    if not code:
+        return {
+            "report": "No code was generated.",
+            "next_step": "manager_decision"
         }
-    )
 
-    # Compile report
-    report = (
-        f"### EXECUTION OUTPUT:\n"
-        f"{execution_result}\n\n"
-        f"### TEST SCENARIOS EVALUATED:\n"
-        f"{cases_str}"
-    )
+    tester_prompt = f"""
+You are the Tester in a Developer-Tester workflow.
+
+Analyze the following Python program:
+
+{code}
+
+Generate suitable test cases for this program.
+
+For each test case provide:
+
+1. Test case number
+2. Input
+3. Expected output
+4. Purpose
+
+Keep the test cases simple and relevant.
+
+Return the test cases in plain text.
+"""
+
+    response = llm.invoke(tester_prompt)
+
+    test_cases = response.content
+
+    # Execute the generated program
+    execution_result = run_python_code(code)
+
+    report = f"""
+GENERATED TEST CASES
+--------------------
+{test_cases}
+
+PROGRAM EXECUTION RESULT
+------------------------
+{execution_result}
+"""
 
     return {
-        "report": report
+        "report": report,
+        "next_step": "manager_decision"
     }
 
 
-# ------------------------------------------------------------
-# MANAGER NODE
-# ------------------------------------------------------------
+# ============================================================
+# 7. MANAGER DECISION NODE
+# ============================================================
 
 def manager_decision_node(state: CrewState):
 
-    print("\n" + "=" * 50)
-    print("--- MANAGER DASHBOARD : TEST REPORT ---")
+    command = state.get("command")
 
-    print(
-        state.get(
-            "report",
-            "No report available."
-        )
-    )
+    if command is None:
+        command = "store"
 
-    print("=" * 50)
+    command = command.lower().strip()
 
-    # Get command from LangServe request
-    user_input = state.get(
-        "command",
-        "store"
-    )
-
-    if user_input is None:
-        user_input = "store"
-
-    user_input = user_input.lower().strip()
-
-    if user_input == "store":
-
-        return {
-            "next_step": "archiver"
-        }
-
-    else:
-
+    if command == "another":
         return {
             "next_step": "task_input"
         }
 
-
-# ------------------------------------------------------------
-# ARCHIVER NODE
-# ------------------------------------------------------------
-
-def archiver_node(state: CrewState):
-
-    print(
-        "\n[Archiver] Task stored successfully. "
-        "Closing workflow."
-    )
-
     return {
-        "next_step": "exit"
+        "next_step": "archiver"
     }
 
 
 # ============================================================
-# 5. GRAPH CONSTRUCTION
+# 8. ARCHIVER NODE
+# ============================================================
+
+def archiver_node(state: CrewState):
+
+    code = state.get("code", "")
+    report = state.get("report", "")
+
+    archive_message = f"""
+TASK ARCHIVED
+
+================ GENERATED CODE ================
+
+{code}
+
+================ TEST REPORT ===================
+
+{report}
+
+=================================================
+"""
+
+    print(archive_message)
+
+    return {
+        "next_step": "end"
+    }
+
+
+# ============================================================
+# 9. ROUTING FUNCTIONS
+# ============================================================
+
+def route_from_input(state: CrewState):
+
+    next_step = state.get("next_step")
+
+    if next_step == "developer":
+        return "developer"
+
+    return END
+
+
+def route_from_decision(state: CrewState):
+
+    next_step = state.get("next_step")
+
+    if next_step == "task_input":
+        return "task_input"
+
+    if next_step == "archiver":
+        return "archiver"
+
+    return END
+
+
+# ============================================================
+# 10. BUILD LANGGRAPH
 # ============================================================
 
 rt_workflow = StateGraph(CrewState)
 
-
-# Add nodes
 rt_workflow.add_node(
     "task_input",
     task_input_node
@@ -345,28 +343,15 @@ rt_workflow.add_node(
 )
 
 
-# ============================================================
-# 6. GRAPH ROUTING
-# ============================================================
+# START → TASK INPUT
 
-# START -> task_input
 rt_workflow.add_edge(
     START,
     "task_input"
 )
 
 
-# ------------------------------------------------------------
-# Route from task input
-# ------------------------------------------------------------
-
-def route_from_input(state: CrewState):
-
-    if state.get("next_step") == "exit":
-        return END
-
-    return "developer"
-
+# TASK INPUT → DEVELOPER
 
 rt_workflow.add_conditional_edges(
     "task_input",
@@ -374,9 +359,7 @@ rt_workflow.add_conditional_edges(
 )
 
 
-# ------------------------------------------------------------
-# Developer -> Tester
-# ------------------------------------------------------------
+# DEVELOPER → TESTER
 
 rt_workflow.add_edge(
     "developer",
@@ -384,9 +367,7 @@ rt_workflow.add_edge(
 )
 
 
-# ------------------------------------------------------------
-# Tester -> Manager
-# ------------------------------------------------------------
+# TESTER → MANAGER
 
 rt_workflow.add_edge(
     "tester",
@@ -394,18 +375,7 @@ rt_workflow.add_edge(
 )
 
 
-# ------------------------------------------------------------
-# Route from Manager
-# ------------------------------------------------------------
-
-def route_from_decision(state: CrewState):
-
-    if state.get("next_step") == "archiver":
-
-        return "archiver"
-
-    return "task_input"
-
+# MANAGER → TASK INPUT / ARCHIVER
 
 rt_workflow.add_conditional_edges(
     "manager_decision",
@@ -413,9 +383,7 @@ rt_workflow.add_conditional_edges(
 )
 
 
-# ------------------------------------------------------------
-# Archiver -> END
-# ------------------------------------------------------------
+# ARCHIVER → END
 
 rt_workflow.add_edge(
     "archiver",
@@ -423,61 +391,99 @@ rt_workflow.add_edge(
 )
 
 
-# ============================================================
-# 7. COMPILE GRAPH
-# ============================================================
+# COMPILE
 
 rt_app = rt_workflow.compile()
 
+
 print(
-    "Interactive pipeline compiled and ready for live execution."
+    "Interactive Developer-Tester LangGraph "
+    "compiled and ready for execution."
 )
 
 
 # ============================================================
-# 8. FASTAPI + LANGSERVE
+# 11. LANGSERVE INPUT MODEL
+# ============================================================
+
+class AgentInput(TypedDict):
+
+    messages: List[BaseMessage]
+
+    next_step: Optional[str]
+
+    code: Optional[str]
+
+    report: Optional[str]
+
+    task: Optional[str]
+
+    command: Optional[str]
+
+
+# ============================================================
+# 12. FORMAT INPUT FOR LANGGRAPH
+# ============================================================
+
+def format_for_agent(x):
+
+    if isinstance(x, dict):
+
+        return {
+            "messages": x.get("messages", []),
+            "next_step": x.get("next_step"),
+            "code": x.get("code"),
+            "report": x.get("report"),
+            "task": x.get("task"),
+            "command": x.get("command")
+        }
+
+    return x
+
+
+# ============================================================
+# 13. LANGSERVE CHAIN
+# ============================================================
+
+formatted_agent_chain = (
+    RunnableLambda(format_for_agent)
+    | rt_app
+)
+
+
+# ============================================================
+# 14. FASTAPI APPLICATION
 # ============================================================
 
 app = FastAPI(
-    title="LangGraph Developer Tester",
-    description="AI Developer and Real-Time Testing Agent",
-    version="1.0"
+    title="LangGraph Developer Tester"
 )
 
 
-# Add LangGraph to LangServe
+# ============================================================
+# 15. LANGSERVE ROUTE
+# ============================================================
+
 add_routes(
     app,
-    rt_app,
-    path="/agent"
+    formatted_agent_chain,
+    path="/agent",
+    playground_type="default"
 )
 
 
 # ============================================================
-# 9. HOME PAGE
-# ============================================================
-
-@app.get("/")
-def home():
-
-    return {
-        "message": "LangGraph LangServe API is running",
-        "endpoint": "/agent",
-        "playground": "/agent/playground/",
-        "docs": "/docs/"
-    }
-
-
-# ============================================================
-# 10. RUN LOCALLY
+# 16. RUN SERVER
 # ============================================================
 
 if __name__ == "__main__":
 
-    import uvicorn
+    port = int(
+        os.environ.get("PORT", 8000)
+    )
 
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000
+        port=port
     )
