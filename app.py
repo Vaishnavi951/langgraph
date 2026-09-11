@@ -264,15 +264,17 @@ def format_for_agent(x):
         "command": command
     }
 
-def run_agent(x):
-    state = format_for_agent(x)
-    result = rt_app.invoke(state)
-    return result.get("code", "No code was generated.")
+class AgentOutput(BaseModel):
+    code: str = Field(description="Generated Python code")
 
-formatted_agent_chain = RunnableLambda(run_agent).with_types(
-    input_type=AgentInput,
-    output_type=str
-)
+def extract_code(state):
+    return {"code": state.get("code", "No code was generated.")}
+
+formatted_agent_chain = (
+    RunnableLambda(format_for_agent)
+    | rt_app
+    | RunnableLambda(extract_code)
+).with_types(input_type=AgentInput, output_type=AgentOutput)
 
 app = FastAPI(title="LangGraph Developer Tester")
 
@@ -289,4 +291,4 @@ def home():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port).0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
