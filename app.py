@@ -81,8 +81,8 @@ Keep the test cases simple and easy to understand.
 Do not generate Python code.
 Return only the test-case description.
 """
-response = llm.invoke(prompt)
-generated_code = response.content.strip()
+    response = llm.invoke(prompt)
+    return response.content
 
 def task_input_node(state: CrewState):
     task = state.get("task")
