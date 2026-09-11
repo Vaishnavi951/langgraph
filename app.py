@@ -361,29 +361,29 @@ rt_workflow.add_edge("archiver", END)
 rt_app = rt_workflow.compile()
 
 print("Interactive pipeline compiled and ready for live execution.")
+from fastapi import FastAPI
+from langserve import add_routes
 
+app = FastAPI(
+    title="LangGraph LangServe API"
+)
+
+add_routes(
+    app,
+    rt_app,
+    path="/agent"
+)
 
 
 # ==========================================
-
-# 6. EXECUTION LOOP
-
+# 7. LOCAL SERVER
 # ==========================================
 
 if __name__ == "__main__":
+    import uvicorn
 
-  try:
-
-    # Start the application with an empty state
-
-    # The recursion limit is set high to allow for multiple loops (another task)
-
-    rt_app.invoke({"messages": []}, config={"recursion_limit": 50})
-
-  except KeyboardInterrupt:
-
-    print("\nStopped by user.")
-
-  except Exception as e:
-
-    print(f"\nAn error occurred: {e}")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000
+    )
